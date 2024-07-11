@@ -7,6 +7,7 @@ use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemor
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
 use regex::Regex;
 use std::{borrow::Cow, cell::RefCell};
+use sha2::{Digest, Sha256};
 
 // Use these types to store our canister's state and generate unique IDs
 type Memory = VirtualMemory<DefaultMemoryImpl>;
@@ -29,7 +30,7 @@ struct Admin {
     id: u64,
     name: String,
     email: String,
-    password: String,
+    password_hash: String,
     created_at: u64,
 }
 
@@ -131,7 +132,7 @@ impl BoundedStorable for Event {
 struct Registration {
     id: u64,
     admin_id: u64,
-    admin_password: String,
+    admin_password_hash: String,
     event_id: u64,
     volunteer_id: u64,
     status: RegistrationStatus,
@@ -217,6 +218,15 @@ struct EventPayload {
     organizer_id: u64,
 }
 
+// Update Event Payload
+#[derive(candid::CandidType, Serialize, Deserialize)]
+struct UpdateEventPayload {
+    title: Option<String>,
+    description: Option<String>,
+    date_time: Option<u64>,
+    location: Option<String>,
+}
+
 // Registration Payload
 #[derive(candid::CandidType, Serialize, Deserialize)]
 struct RegistrationPayload {
@@ -288,7 +298,7 @@ thread_local! {
     ));
 
     static ID_COUNTER: RefCell<IdCell> = RefCell::new(
-        IdCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(5))), 0)
+        IdCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(6))), 0)
             .expect("Cannot create a counter")
     );
 }
@@ -305,6 +315,13 @@ fn generate_id() -> u64 {
 // Helper function to get the current time in milliseconds since the Unix epoch
 fn get_current_time() -> u64 {
     time() / 1_000_000 // Convert to milliseconds
+}
+
+// Helper function to hash a password
+fn hash_password(password: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(password);
+    format!("{:x}", hasher.finalize())
 }
 
 // Function to create a new admin
@@ -337,14 +354,15 @@ fn create_admin(payload: AdminPayload) -> Result<Admin, String> {
         return Err("Invalid input: Ensure 'password' is at least 8 characters long.".to_string());
     }
 
-    // Ensure the password is hashed before storing it
+    // Hash the password before storing it
+    let password_hash = hash_password(&payload.password);
 
     // Create a new admin
     let admin = Admin {
         id: generate_id(),
         name: payload.name,
         email: payload.email,
-        password: payload.password,
+        password_hash,
         created_at: get_current_time(),
     };
 
@@ -449,6 +467,27 @@ fn get_volunteer_by_id(volunteer_id: u64) -> Result<Volunteer, String> {
     }
 }
 
+// Function to search volunteers by skills
+#[ic_cdk::query]
+fn search_volunteers_by_skills(skills: Vec<String>) -> Result<Vec<Volunteer>, String> {
+    let volunteers = VOLUNTEERS_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter()
+            .filter(|(_, volunteer)| {
+                skills.iter().all(|skill| volunteer.skills.contains(skill))
+            })
+            .map(|(_, volunteer)| volunteer.clone())
+            .collect::<Vec<Volunteer>>()
+    });
+
+    if volunteers.is_empty() {
+        return Err("No volunteers found with the specified skills.".to_string());
+    }
+
+    Ok(volunteers)
+}
+
 // Function to retrieve volunteers in chunks (pagination)
 #[ic_cdk::query]
 fn get_volunteers_by_chunk(offset: u64, limit: u64) -> Result<Vec<Volunteer>, String> {
@@ -474,7 +513,7 @@ fn get_volunteers_by_chunk(offset: u64, limit: u64) -> Result<Vec<Volunteer>, St
     }
 
     let start = offset as usize;
-    let end = (offset + limit) as usize;
+    let end = (offset + limit).min(total_volunteers) as usize;
     let volunteers_chunk = volunteers[start..end].to_vec();
 
     Ok(volunteers_chunk)
@@ -493,16 +532,12 @@ fn get_all_volunteers() -> Result<Vec<Volunteer>, String> {
 
     if volunteers.is_empty() {
         return Err("No volunteers found.".to_string());
-    }
-
-    if volunteers.is_empty() {
-        return Err("No volunteers found.".to_string());
     } else {
         Ok(volunteers)
     }
 }
 
-// Function to create a new event(Event is created by an EventOrganizer)
+// Function to create a new event (Event is created by an EventOrganizer)
 #[ic_cdk::update]
 fn create_event(payload: EventPayload) -> Result<Event, String> {
     // Ensure all required fields are provided
@@ -541,12 +576,41 @@ fn create_event(payload: EventPayload) -> Result<Event, String> {
     Ok(event)
 }
 
+// Function to update event details
+#[ic_cdk::update]
+fn update_event(event_id: u64, payload: UpdateEventPayload) -> Result<Event, String> {
+    // Ensure the event exists
+    let event = EVENTS_STORAGE.with(|storage| storage.borrow().get(&event_id));
+    match event {
+        Some(mut event) => {
+            // Update event details if provided
+            if let Some(title) = payload.title {
+                event.title = title;
+            }
+            if let Some(description) = payload.description {
+                event.description = description;
+            }
+            if let Some(date_time) = payload.date_time {
+                event.date_time = date_time;
+            }
+            if let Some(location) = payload.location {
+                event.location = location;
+            }
+
+            // Save the updated event
+            EVENTS_STORAGE.with(|storage| storage.borrow_mut().insert(event_id, event.clone()));
+            Ok(event)
+        }
+        None => Err("Event with the provided ID does not exist.".to_string()),
+    }
+}
+
 // Helper Function to validate the admin password
 fn validate_admin_password(admin_id: u64, admin_password: &str) -> Result<bool, String> {
     let admin = ADMINS_STORAGE.with(|storage| storage.borrow().get(&admin_id));
     match admin {
         Some(admin) => {
-            if admin.password == admin_password {
+            if admin.password_hash == hash_password(admin_password) {
                 Ok(true)
             } else {
                 Err(
@@ -597,7 +661,7 @@ fn get_event_by_title(title: String) -> Result<Event, String> {
 
 // Fetch event by Event Organizer's name
 #[ic_cdk::query]
-fn get_event_by_organizer_name(name: String) -> Result<Vec<Event>, String> {
+fn get_events_by_organizer_name(name: String) -> Result<Vec<Event>, String> {
     let events = EVENTS_STORAGE.with(|storage| {
         storage
             .borrow()
@@ -625,7 +689,38 @@ fn get_event_by_organizer_name(name: String) -> Result<Vec<Event>, String> {
     Ok(events)
 }
 
-// Function to create a new registration for an event(volunteer registration done by the admin)
+// Function to retrieve events in chunks (pagination)
+#[ic_cdk::query]
+fn get_events_by_chunk(offset: u64, limit: u64) -> Result<Vec<Event>, String> {
+    // Ensure offset is not greater than the total number of events
+    let total_events = EVENTS_STORAGE.with(|storage| storage.borrow().len() as u64);
+    if offset >= total_events {
+        return Err(
+            "Invalid input: Offset is greater than the total number of events.".to_string(),
+        );
+    }
+
+    // Ensure limit is not greater than the total number of events
+    let events = EVENTS_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter()
+            .map(|(_, event)| event.clone())
+            .collect::<Vec<Event>>()
+    });
+
+    if events.is_empty() {
+        return Err("No events found.".to_string());
+    }
+
+    let start = offset as usize;
+    let end = (offset + limit).min(total_events) as usize;
+    let events_chunk = events[start..end].to_vec();
+
+    Ok(events_chunk)
+}
+
+// Function to create a new registration for an event (volunteer registration done by the admin)
 #[ic_cdk::update]
 fn register_volunteers_for_events(payload: RegistrationPayload) -> Result<Registration, String> {
     // Ensure all required fields are provided
@@ -654,7 +749,7 @@ fn register_volunteers_for_events(payload: RegistrationPayload) -> Result<Regist
             return Err("Invalid input: Volunteer with the provided ID does not exist.".to_string())
         }
     }
-    
+
     // Validate the event_id to ensure it exists
     let event = EVENTS_STORAGE.with(|storage| storage.borrow().get(&payload.event_id));
     match event {
@@ -666,7 +761,7 @@ fn register_volunteers_for_events(payload: RegistrationPayload) -> Result<Regist
     let registration = Registration {
         id: generate_id(),
         admin_id: payload.admin_id,
-        admin_password: payload.admin_password,
+        admin_password_hash: hash_password(&payload.admin_password),
         event_id: payload.event_id,
         volunteer_id: payload.volunteer_id,
         status: RegistrationStatus::Registered,
@@ -841,7 +936,26 @@ fn get_feedback_by_event_id(event_id: u64) -> Result<Vec<Feedback>, String> {
             .map(|(_, feedback)| feedback.clone())
             .collect::<Vec<Feedback>>()
     });
-    
+
+    if feedbacks.is_empty() {
+        return Err("No feedback found.".to_string());
+    } else {
+        Ok(feedbacks)
+    }
+}
+
+// Function to retrieve feedback for a specific volunteer
+#[ic_cdk::query]
+fn get_feedback_by_volunteer_id(volunteer_id: u64) -> Result<Vec<Feedback>, String> {
+    let feedbacks = FEEDBACKS_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter()
+            .filter(|(_, feedback)| feedback.volunteer_id == volunteer_id)
+            .map(|(_, feedback)| feedback.clone())
+            .collect::<Vec<Feedback>>()
+    });
+
     if feedbacks.is_empty() {
         return Err("No feedback found.".to_string());
     } else {
