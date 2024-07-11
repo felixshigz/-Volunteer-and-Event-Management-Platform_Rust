@@ -1,6 +1,6 @@
 type Admin = record {
   id : nat64;
-  password : text;
+  password_hash : text;
   name : text;
   created_at : nat64;
   email : text;
@@ -61,11 +61,11 @@ type MarkRegistrationAsMissedPayload = record {
 type Registration = record {
   id : nat64;
   status : RegistrationStatus;
-  admin_password : text;
   admin_id : nat64;
   attended_at : opt nat64;
   event_id : nat64;
   registered_at : nat64;
+  admin_password_hash : text;
   volunteer_id : nat64;
 };
 type RegistrationPayload = record {
@@ -85,6 +85,12 @@ type Result_6 = variant { Ok : vec Feedback; Err : text };
 type Result_7 = variant { Ok : vec Registration; Err : text };
 type Result_8 = variant { Ok : vec Volunteer; Err : text };
 type Result_9 = variant { Ok : Registration; Err : text };
+type UpdateEventPayload = record {
+  title : opt text;
+  date_time : opt nat64;
+  description : opt text;
+  location : opt text;
+};
 type Volunteer = record {
   id : nat64;
   contact : text;
@@ -109,9 +115,11 @@ service : {
   get_all_feedbacks : () -> (Result_6) query;
   get_all_registrations : () -> (Result_7) query;
   get_all_volunteers : () -> (Result_8) query;
-  get_event_by_organizer_name : (text) -> (Result_5) query;
   get_event_by_title : (text) -> (Result_1) query;
+  get_events_by_chunk : (nat64, nat64) -> (Result_5) query;
+  get_events_by_organizer_name : (text) -> (Result_5) query;
   get_feedback_by_event_id : (nat64) -> (Result_6) query;
+  get_feedback_by_volunteer_id : (nat64) -> (Result_6) query;
   get_volunteer_by_id : (nat64) -> (Result_4) query;
   get_volunteers_by_chunk : (nat64, nat64) -> (Result_8) query;
   mark_registration_as_attended : (MarkRegistrationAsAttendedPayload) -> (
@@ -119,4 +127,6 @@ service : {
     );
   mark_registration_as_missed : (MarkRegistrationAsMissedPayload) -> (Result_9);
   register_volunteers_for_events : (RegistrationPayload) -> (Result_9);
+  search_volunteers_by_skills : (vec text) -> (Result_8) query;
+  update_event : (nat64, UpdateEventPayload) -> (Result_1);
 }

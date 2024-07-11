@@ -16,6 +16,7 @@ serde_json = "1.0"
 regex = "1.5"
 ic-stable-structures = { git = "https://github.com/lwshang/stable-structures.git", branch = "lwshang/update_cdk" }
 chrono = "0.4"
+sha2 = "0.9"
 
 [dependencies.getrandom]
 version = "0.2"
